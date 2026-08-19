@@ -1,0 +1,543 @@
+#define BLYNK_TEMPLATE_ID "TMPL4-9hb_uGq"
+#define BLYNK_TEMPLATE_NAME "Smart security Door"
+#define BLYNK_AUTH_TOKEN "YOUR_NEW_BLYNK_TOKEN"
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <Keypad.h>
+#include <ESP32Servo.h>
+#include <LiquidCrystal_I2C.h>
+
+// =====================================================
+// WiFi
+// =====================================================
+
+char ssid[] = "Wokwi-GUEST";
+char pass[] = "";
+
+// =====================================================
+// Pin configuration
+// =====================================================
+
+constexpr uint8_t SERVO_PIN = 13;
+constexpr uint8_t GREEN_LED = 14;
+constexpr uint8_t RED_LED   = 27;
+constexpr uint8_t BUZZER    = 26;
+
+// =====================================================
+// Security settings
+// =====================================================
+
+constexpr uint8_t PIN_LENGTH = 4;
+constexpr uint8_t MAX_ATTEMPTS = 3;
+
+const char CORRECT_PIN[] = "1234";
+
+String enteredPIN;
+
+uint8_t failedAttempts = 0;
+
+// =====================================================
+// LCD
+// =====================================================
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// =====================================================
+// Servo
+// =====================================================
+
+Servo doorServo;
+
+constexpr uint8_t LOCKED_ANGLE = 0;
+constexpr uint8_t UNLOCKED_ANGLE = 90;
+
+// =====================================================
+// Keypad
+// =====================================================
+
+constexpr byte ROWS = 4;
+constexpr byte COLS = 4;
+
+char keys[ROWS][COLS] = {
+  {'1', '2', '3', 'A'},
+  {'4', '5', '6', 'B'},
+  {'7', '8', '9', 'C'},
+  {'*', '0', '#', 'D'}
+};
+
+byte rowPins[ROWS] = {23, 19, 18, 17};
+byte colPins[COLS] = {16, 4, 25, 33};
+
+Keypad keypad = Keypad(
+  makeKeymap(keys),
+  rowPins,
+  colPins,
+  ROWS,
+  COLS
+);
+
+// =====================================================
+// System states
+// =====================================================
+
+enum SystemState {
+  LOCKED,
+  UNLOCKED,
+  DENIED,
+  ALARM
+};
+
+SystemState systemState = LOCKED;
+
+// =====================================================
+// Timers
+// =====================================================
+
+unsigned long stateTimer = 0;
+unsigned long alarmTimer = 0;
+
+constexpr unsigned long UNLOCK_TIME = 5000;
+constexpr unsigned long DENIED_TIME = 1500;
+constexpr unsigned long ALARM_STEP_TIME = 300;
+
+// =====================================================
+// Alarm
+// =====================================================
+
+uint8_t alarmStep = 0;
+bool alarmOutput = false;
+
+// =====================================================
+// Blynk update helper
+// =====================================================
+
+void updateBlynk(
+  const char* doorStatus,
+  const char* message,
+  const char* alarmStatus
+) {
+  Blynk.virtualWrite(V0, doorStatus);
+  Blynk.virtualWrite(V1, message);
+  Blynk.virtualWrite(V2, failedAttempts);
+  Blynk.virtualWrite(V3, alarmStatus);
+}
+
+// =====================================================
+// LCD helper
+// =====================================================
+
+void clearLCD() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+}
+
+// =====================================================
+// Locked screen
+// =====================================================
+
+void showLockedScreen() {
+
+  systemState = LOCKED;
+
+  clearLCD();
+
+  lcd.print("DOOR LOCKED");
+  lcd.setCursor(0, 1);
+  lcd.print("ENTER PIN:");
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, HIGH);
+
+  noTone(BUZZER);
+
+  updateBlynk(
+    "LOCKED",
+    "READY",
+    "NORMAL"
+  );
+
+  Serial.println("Door locked");
+}
+
+// =====================================================
+// Display entered PIN
+// =====================================================
+
+void displayPIN() {
+
+  lcd.setCursor(0, 1);
+  lcd.print("PIN: ");
+
+  for (uint8_t i = 0; i < PIN_LENGTH; i++) {
+
+    if (i < enteredPIN.length()) {
+      lcd.print('*');
+    } else {
+      lcd.print(' ');
+    }
+  }
+}
+
+// =====================================================
+// Unlock door
+// =====================================================
+
+void unlockDoor() {
+
+  systemState = UNLOCKED;
+
+  doorServo.write(UNLOCKED_ANGLE);
+
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(GREEN_LED, HIGH);
+
+  noTone(BUZZER);
+
+  clearLCD();
+
+  lcd.print("ACCESS GRANTED");
+  lcd.setCursor(0, 1);
+  lcd.print("DOOR UNLOCKED");
+
+  Serial.println("Access granted");
+
+  updateBlynk(
+    "UNLOCKED",
+    "ACCESS GRANTED",
+    "NORMAL"
+  );
+
+  stateTimer = millis();
+}
+
+// =====================================================
+// Lock after timeout
+// =====================================================
+
+void handleUnlocked() {
+
+  if (millis() - stateTimer >= UNLOCK_TIME) {
+    lockDoor();
+  }
+}
+
+// =====================================================
+// Lock door
+// =====================================================
+
+void lockDoor() {
+
+  doorServo.write(LOCKED_ANGLE);
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, HIGH);
+
+  noTone(BUZZER);
+
+  showLockedScreen();
+}
+
+// =====================================================
+// Check PIN
+// =====================================================
+
+void checkPIN() {
+
+  if (enteredPIN.length() != PIN_LENGTH) {
+
+    clearLCD();
+
+    lcd.print("ENTER 4 DIGITS");
+
+    stateTimer = millis();
+    systemState = DENIED;
+
+    return;
+  }
+
+  if (enteredPIN.equals(CORRECT_PIN)) {
+
+    failedAttempts = 0;
+
+    unlockDoor();
+
+  } else {
+
+    failedAttempts++;
+
+    denyAccess();
+  }
+
+  enteredPIN = "";
+}
+
+// =====================================================
+// Access denied
+// =====================================================
+
+void denyAccess() {
+
+  systemState = DENIED;
+  stateTimer = millis();
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, HIGH);
+
+  tone(BUZZER, 1000);
+
+  clearLCD();
+
+  lcd.print("ACCESS DENIED");
+  lcd.setCursor(0, 1);
+  lcd.print("Attempts: ");
+  lcd.print(failedAttempts);
+
+  Serial.print("Access denied. Attempt: ");
+  Serial.println(failedAttempts);
+
+  updateBlynk(
+    "LOCKED",
+    "ACCESS DENIED",
+    "NORMAL"
+  );
+
+  // Third failed attempt -> alarm
+  if (failedAttempts >= MAX_ATTEMPTS) {
+    startAlarm();
+  }
+}
+
+// =====================================================
+// Handle denied state
+// =====================================================
+
+void handleDenied() {
+
+  // Stop buzzer after 1 second
+  if (millis() - stateTimer >= 1000) {
+    noTone(BUZZER);
+  }
+
+  // Return to locked screen
+  if (millis() - stateTimer >= DENIED_TIME) {
+
+    if (failedAttempts >= MAX_ATTEMPTS) {
+      startAlarm();
+    } else {
+      showLockedScreen();
+    }
+  }
+}
+
+// =====================================================
+// Start alarm
+// =====================================================
+
+void startAlarm() {
+
+  systemState = ALARM;
+
+  alarmStep = 0;
+  alarmOutput = false;
+  alarmTimer = millis();
+
+  clearLCD();
+
+  lcd.print("!!! ALARM !!!");
+  lcd.setCursor(0, 1);
+  lcd.print("3 FAILED TRIES");
+
+  Serial.println("SECURITY ALARM");
+
+  updateBlynk(
+    "LOCKED",
+    "SECURITY ALARM",
+    "ALARM"
+  );
+}
+
+// =====================================================
+// Handle alarm
+// =====================================================
+
+void handleAlarm() {
+
+  if (millis() - alarmTimer < ALARM_STEP_TIME) {
+    return;
+  }
+
+  alarmTimer = millis();
+
+  alarmOutput = !alarmOutput;
+
+  if (alarmOutput) {
+
+    digitalWrite(RED_LED, HIGH);
+    tone(BUZZER, 1500);
+
+  } else {
+
+    digitalWrite(RED_LED, LOW);
+    noTone(BUZZER);
+
+    alarmStep++;
+
+    // 5 complete alarm cycles
+    if (alarmStep >= 10) {
+
+      noTone(BUZZER);
+
+      failedAttempts = 0;
+
+      showLockedScreen();
+    }
+  }
+}
+
+// =====================================================
+// Keypad handling
+// =====================================================
+
+void handleKeypad() {
+
+  char key = keypad.getKey();
+
+  if (!key) {
+    return;
+  }
+
+  Serial.print("Key pressed: ");
+  Serial.println(key);
+
+  // Ignore keypad while door is unlocked or alarm is active
+  if (systemState == UNLOCKED || systemState == ALARM) {
+    return;
+  }
+
+  // Submit PIN
+  if (key == '#') {
+
+    checkPIN();
+    return;
+  }
+
+  // Clear PIN
+  if (key == '*') {
+
+    enteredPIN = "";
+
+    clearLCD();
+
+    lcd.print("PIN CLEARED");
+
+    stateTimer = millis();
+
+    // Temporarily show PIN CLEARED
+    systemState = DENIED;
+
+    updateBlynk(
+      "LOCKED",
+      "PIN CLEARED",
+      "NORMAL"
+    );
+
+    return;
+  }
+
+  // Only accept numeric keys
+  if (key >= '0' && key <= '9') {
+
+    if (enteredPIN.length() < PIN_LENGTH) {
+
+      enteredPIN += key;
+
+      displayPIN();
+    }
+  }
+}
+
+// =====================================================
+// Handle temporary PIN cleared message
+// =====================================================
+
+void handleTemporaryMessage() {
+
+  if (systemState == DENIED &&
+      enteredPIN.length() == 0 &&
+      failedAttempts < MAX_ATTEMPTS) {
+
+    // Do not interfere with normal denied handling
+    return;
+  }
+}
+
+// =====================================================
+// Setup
+// =====================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  // GPIO
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, HIGH);
+  digitalWrite(BUZZER, LOW);
+
+  // LCD
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(0, 0);
+  lcd.print("SMART SECURITY");
+  lcd.setCursor(0, 1);
+  lcd.print("STARTING...");
+
+  // Servo
+  doorServo.setPeriodHertz(50);
+  doorServo.attach(SERVO_PIN, 500, 2400);
+  doorServo.write(LOCKED_ANGLE);
+
+  // Blynk
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+  enteredPIN.reserve(PIN_LENGTH);
+
+  delay(1000);
+
+  showLockedScreen();
+}
+
+// =====================================================
+// Main loop
+// =====================================================
+
+void loop() {
+
+  Blynk.run();
+
+  handleKeypad();
+
+  switch (systemState) {
+
+    case LOCKED:
+      break;
+
+    case UNLOCKED:
+      handleUnlocked();
+      break;
+
+    case DENIED:
+      handleDenied();
+      break;
+
+    case ALARM:
+      handleAlarm();
+      break;
+  }
+}
