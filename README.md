@@ -42,6 +42,4 @@ A future version could use machine learning to identify unusual access patterns 
 
 ## Simulation
 https://wokwi.com/projects/472785715846566913
-Wokwi simulation:
 
-[Open Wokwi Simulation](YOUR_WOKWI_LINK)
